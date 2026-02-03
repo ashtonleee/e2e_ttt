@@ -1,2 +1,3 @@
-# e2e_ttt
-implementing e2e_ttt for fun, go continual learning!
+# E2E TTT paper implementation
+- Implementing toy, attention-less model first
+    - 2 blocks
