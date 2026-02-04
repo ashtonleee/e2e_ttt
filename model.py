@@ -18,6 +18,21 @@ class Model(nn.Module):
         self.cfg = cfg
         self.lr = 3e-4
     
+    def ttt_inner_step(self, mini_batch, dynamic, static):
+        # mini_batch: (B x b)
+
+        all_params = {**dynamic, **static}
+        logits = functional_call(self.transformer, all_params, (mini_batch[:,:-1],)) # wrap in tensor
+
+        # logits: (B*b, V), mini_batch: (B*b)
+        loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), mini_batch[:,1:].reshape(-1))
+
+        # create graph so we can grad of grad!
+        grads = grad(loss, list(dynamic.values()), create_graph=True)
+        updated_dynamic = {k : (v - self.lr * g) for (k, v), g in zip(dynamic.items(), grads)}
+
+        return updated_dynamic, logits, loss
+
     def forward(self, x):
         # x: (B, T)
         #   - IDs
@@ -31,42 +46,20 @@ class Model(nn.Module):
         logit_chunks = []
 
         b = self.cfg.mini_batch_size
-        T = x.size(1)
+        V = self.cfg.vocab_size
+        B, T = x.shape
         # inner loop:
         for i in range(0, T-1, b): # indexing safeguard
             # chunk of b + 1?
             mini_batch = x[:, i:i+b+1]
 
-            all_params = {**dynamic, **static}
-            logits = functional_call(self.transformer, all_params, (mini_batch[:,:-1],)) # wrap in tensor
+            # inner loop step
+            dynamic, logit_chunk, loss = self.ttt_inner_step(mini_batch, dynamic, static)
 
-            # logits: (B*b, V), mini_batch: (B*b)
-            loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), mini_batch[:,1:].reshape(-1))
+            # concat logits
+            logit_chunks.append(logit_chunk)
 
-            # create graph so we can grad of grad!
-            grads = grad(loss, list(dynamic.values()), create_graph=True)
-            dynamic = {k : (v - self.lr * g) for (k, v), g in zip(dynamic.items(), grads)}
+        logits = torch.cat(logit_chunks, dim=1)
+        assert logits.shape == [B, (T-1)//b, V]
 
-            logit_chunks.append(logits)
-
-        return torch.cat(logit_chunks, dim=1)
-
-if __name__ == '__main__':
-    cfg = Config(dim=16,
-                 dim_hidden=32,
-                 p_drop=0,
-                 num_blocks=2,
-                 vocab_size=50,
-                 mini_batch_size=4)
-    model = Model(cfg)
-
-    x = torch.randint(0, cfg.vocab_size, (2, 17), dtype=torch.long)
-    logits = model(x)
-    print('logits:', logits.shape)
-
-    S = logits.size(1)
-    targets = x[:, 1:1+S] # the matching targets: (B, S)
-
-    loss = torch.nn.functional.cross_entropy(logits.reshape(-1, logits.size(-1)), targets.reshape(-1))
-    loss.backward()
-    print('loss', float(loss))
+        return logits
